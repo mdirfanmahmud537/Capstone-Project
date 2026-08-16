@@ -18,6 +18,7 @@
  * Storage files are human-readable text/CSV-style files separated by '|'.
  */
 
+
 #define MAX_CUSTOMERS     100
 #define MAX_TRANSACTIONS  1000
 #define MAX_STAFF         20
