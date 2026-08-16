@@ -1,0 +1,1537 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <time.h>
+#include <ctype.h>
+
+/*
+ * Banking Transaction Management System
+ * Course: SE 133 - Software Development Capstone Project
+ *
+ * Requirements covered from the supplied SRS:
+ * FR1-FR24 and NFR1-NFR6, including login/authentication, account
+ * management, transactions, search, balance/statement/history, reports,
+ * sorting, low-balance alerts, backup/restore, persistent text-file storage,
+ * action logging and logout.
+ *
+ * Storage files are human-readable text/CSV-style files separated by '|'.
+ */
+
+#define MAX_CUSTOMERS     100
+#define MAX_TRANSACTIONS  1000
+#define MAX_STAFF         20
+#define MAX_STR           100
+#define START_ACC_NO      1001
+#define LOW_BALANCE_LIMIT 100.00
+
+#define CUSTOMER_FILE     "customers.txt"
+#define TRANSACTION_FILE  "transactions.txt"
+#define STAFF_FILE        "staff.txt"
+#define LOG_FILE          "audit_log.txt"
+#define REPORT_FILE       "bank_report.txt"
+#define BACKUP_CUSTOMER   "backup_customers.txt"
+#define BACKUP_TRANS      "backup_transactions.txt"
+#define BACKUP_STAFF      "backup_staff.txt"
+#define BACKUP_LOG        "backup_audit_log.txt"
+
+#define ROLE_ADMIN        "admin"
+#define ROLE_STAFF        "staff"
+#define ROLE_CUSTOMER     "customer"
+
+typedef struct {
+    int acc_no;
+    char name[MAX_STR];
+    char phone[20];
+    char address[MAX_STR];
+    char acc_type[15];
+    char pin[8];
+    double balance;
+    bool active;
+    char created[30];
+} Customer;
+
+typedef struct {
+    int id;
+    int acc_no;
+    char type[20];
+    double amount;
+    double balance_after;
+    int related_acc;
+    char date[30];
+} Transaction;
+
+typedef struct {
+    int id;
+    char username[MAX_STR];
+    char password[MAX_STR];
+    char fullname[MAX_STR];
+    char role[10];
+    bool active;
+} Staff;
+
+Customer customers[MAX_CUSTOMERS];
+Transaction transactions[MAX_TRANSACTIONS];
+Staff staffList[MAX_STAFF];
+
+int cust_count = 0;
+int trans_count = 0;
+int staff_count = 0;
+
+Staff current_user;
+bool logged_in = false;
+int current_customer_index = -1;
+
+/* ---------- Utility ---------- */
+void clearScreen(void);
+void header(const char *title);
+void pressEnter(void);
+void getTime(char *buffer, size_t size);
+void readInput(const char *prompt, char *buffer, int size);
+int getInt(const char *prompt);
+double getDouble(const char *prompt);
+bool confirm(const char *prompt);
+void sanitizeField(char *s);
+void copyString(char *dest, const char *src, size_t size);
+void trimSpaces(char *s);
+bool isBlank(const char *s);
+
+/* ---------- Persistence ---------- */
+void saveData(void);
+void loadData(void);
+void saveCustomers(void);
+void saveTransactions(void);
+void saveStaff(void);
+void loadCustomers(void);
+void loadTransactions(void);
+void loadStaff(void);
+void initAdmin(void);
+void backupData(void);
+void restoreData(void);
+void logAction(const char *action);
+
+/* ---------- Authentication / menus ---------- */
+bool login(void);
+bool staffLogin(void);
+bool customerLogin(void);
+void logout(void);
+void adminMenu(void);
+void staffMenu(void);
+void customerMenu(void);
+
+/* ---------- Account functions ---------- */
+void createAccount(void);
+void viewAccounts(void);
+void searchAccount(void);
+void updateAccount(void);
+void deleteAccount(void);
+void viewBalance(void);
+void accountStatement(void);
+void sortAccounts(void);
+void lowBalanceAlert(void);
+
+/* ---------- Transaction functions ---------- */
+void depositMoney(void);
+void withdrawMoney(void);
+void transferMoney(void);
+void viewHistory(void);
+void generateReports(void);
+void addTransaction(int acc_no, const char *type, double amount,
+                    double balance, int related);
+
+/* ---------- Staff functions ---------- */
+void createStaff(void);
+void viewStaff(void);
+void changePassword(void);
+void disableStaff(void);
+
+/* ---------- Search / validation ---------- */
+int findCustomer(int acc_no);
+int findCustomerAny(int acc_no);
+int findCustomerByName(const char *name);
+int findStaffByUsername(const char *username);
+int generateAccNo(void);
+void showCustomer(int idx);
+
+/* ---------- Sorting helpers ---------- */
+int compareAccNo(const void *a, const void *b);
+int compareBalance(const void *a, const void *b);
+
+/* ================================================================ */
+/* MAIN                                                            */
+/* ================================================================ */
+int main(void) {
+    loadData();
+    initAdmin();
+
+    while (1) {
+        clearScreen();
+        header("BANKING TRANSACTION MANAGEMENT SYSTEM");
+        printf("  1. Staff/Admin Login\n");
+        printf("  2. Customer Login\n");
+        printf("  3. Exit\n");
+
+        int choice = getInt("\n  Enter choice: ");
+
+        if (choice == 1) {
+            if (staffLogin()) {
+                if (strcmp(current_user.role, ROLE_ADMIN) == 0)
+                    adminMenu();
+                else
+                    staffMenu();
+                logout();
+            }
+        } else if (choice == 2) {
+            if (customerLogin()) {
+                customerMenu();
+                logout();
+            }
+        } else if (choice == 3) {
+            saveData();
+            printf("\n  Thank you for using the Banking System!\n");
+            break;
+        } else {
+            printf("\n  Invalid choice!\n");
+            pressEnter();
+        }
+    }
+
+    return 0;
+}
+
+/* ================================================================ */
+/* AUTHENTICATION                                                   */
+/* ================================================================ */
+bool staffLogin(void) {
+    clearScreen();
+    header("STAFF / ADMIN LOGIN");
+
+    char uname[MAX_STR], pass[MAX_STR];
+    readInput("  Username: ", uname, sizeof(uname));
+    readInput("  Password: ", pass, sizeof(pass));
+
+    for (int i = 0; i < staff_count; i++) {
+        if (strcmp(staffList[i].username, uname) == 0 &&
+            strcmp(staffList[i].password, pass) == 0) {
+
+            if (!staffList[i].active) {
+                printf("\n  Account disabled! Contact administrator.\n");
+                pressEnter();
+                return false;
+            }
+
+            current_user = staffList[i];
+            logged_in = true;
+            current_customer_index = -1;
+            logAction("User logged in");
+            printf("\n  Welcome, %s!\n", current_user.fullname);
+            pressEnter();
+            return true;
+        }
+    }
+
+    printf("\n  Invalid credentials!\n");
+    pressEnter();
+    return false;
+}
+
+bool customerLogin(void) {
+    clearScreen();
+    header("CUSTOMER LOGIN");
+
+    int acc = getInt("  Account Number: ");
+    int idx = findCustomer(acc);
+
+    if (idx == -1) {
+        printf("\n  Active account not found!\n");
+        pressEnter();
+        return false;
+    }
+
+    char pin[8];
+    readInput("  4-digit PIN: ", pin, sizeof(pin));
+
+    if (strcmp(pin, customers[idx].pin) != 0) {
+        printf("\n  Incorrect PIN!\n");
+        logAction("Failed customer login attempt");
+        pressEnter();
+        return false;
+    }
+
+    memset(&current_user, 0, sizeof(current_user));
+    copyString(current_user.fullname, customers[idx].name, sizeof(current_user.fullname));
+    copyString(current_user.role, ROLE_CUSTOMER, sizeof(current_user.role));
+    logged_in = true;
+    current_customer_index = idx;
+    logAction("Customer logged in");
+
+    printf("\n  Welcome, %s!\n", customers[idx].name);
+    pressEnter();
+    return true;
+}
+
+void logout(void) {
+    if (logged_in) logAction("User logged out");
+    memset(&current_user, 0, sizeof(current_user));
+    logged_in = false;
+    current_customer_index = -1;
+}
+
+/* ================================================================ */
+/* ADMIN MENU                                                       */
+/* ================================================================ */
+void adminMenu(void) {
+    int choice;
+    do {
+        clearScreen();
+        header("ADMIN DASHBOARD");
+        printf("  Logged in as: %s\n\n", current_user.fullname);
+        printf("  1.  Create Customer Account\n");
+        printf("  2.  View All Accounts\n");
+        printf("  3.  Search Account\n");
+        printf("  4.  Update Customer\n");
+        printf("  5.  Delete Account\n");
+        printf("  6.  Deposit Money\n");
+        printf("  7.  Withdraw Money\n");
+        printf("  8.  Transfer Money\n");
+        printf("  9.  View Transactions\n");
+        printf("  10. View Balance\n");
+        printf("  11. Account Statement\n");
+        printf("  12. Sort Accounts\n");
+        printf("  13. Low Balance Alert\n");
+        printf("  14. Generate Reports\n");
+        printf("  15. Backup Data\n");
+        printf("  16. Restore Data\n");
+        printf("  17. Create Staff\n");
+        printf("  18. View Staff\n");
+        printf("  19. Disable/Enable Staff\n");
+        printf("  20. Change Password\n");
+        printf("  21. Logout\n");
+
+        choice = getInt("\n  Choice: ");
+
+        switch (choice) {
+            case 1: createAccount(); break;
+            case 2: viewAccounts(); break;
+            case 3: searchAccount(); break;
+            case 4: updateAccount(); break;
+            case 5: deleteAccount(); break;
+            case 6: depositMoney(); break;
+            case 7: withdrawMoney(); break;
+            case 8: transferMoney(); break;
+            case 9: viewHistory(); break;
+            case 10: viewBalance(); break;
+            case 11: accountStatement(); break;
+            case 12: sortAccounts(); break;
+            case 13: lowBalanceAlert(); break;
+            case 14: generateReports(); break;
+            case 15: backupData(); break;
+            case 16: restoreData(); break;
+            case 17: createStaff(); break;
+            case 18: viewStaff(); break;
+            case 19: disableStaff(); break;
+            case 20: changePassword(); break;
+            case 21: printf("\n  Logging out...\n"); break;
+            default: printf("\n  Invalid choice!\n"); pressEnter();
+        }
+    } while (choice != 21);
+}
+
+/* ================================================================ */
+/* STAFF MENU                                                       */
+/* ================================================================ */
+void staffMenu(void) {
+    int choice;
+    do {
+        clearScreen();
+        header("BANK STAFF DASHBOARD");
+        printf("  Logged in as: %s\n\n", current_user.fullname);
+        printf("  1. Create Account\n");
+        printf("  2. View Accounts\n");
+        printf("  3. Search Account\n");
+        printf("  4. Update Customer\n");
+        printf("  5. Deposit Money\n");
+        printf("  6. Withdraw Money\n");
+        printf("  7. Transfer Money\n");
+        printf("  8. View Transactions\n");
+        printf("  9. View Balance\n");
+        printf("  10. Account Statement\n");
+        printf("  11. Sort Accounts\n");
+        printf("  12. Low Balance Alert\n");
+        printf("  13. Generate Reports\n");
+        printf("  14. Change Password\n");
+        printf("  15. Logout\n");
+
+        choice = getInt("\n  Choice: ");
+
+        switch (choice) {
+            case 1: createAccount(); break;
+            case 2: viewAccounts(); break;
+            case 3: searchAccount(); break;
+            case 4: updateAccount(); break;
+            case 5: depositMoney(); break;
+            case 6: withdrawMoney(); break;
+            case 7: transferMoney(); break;
+            case 8: viewHistory(); break;
+            case 9: viewBalance(); break;
+            case 10: accountStatement(); break;
+            case 11: sortAccounts(); break;
+            case 12: lowBalanceAlert(); break;
+            case 13: generateReports(); break;
+            case 14: changePassword(); break;
+            case 15: printf("\n  Logging out...\n"); break;
+            default: printf("\n  Invalid choice!\n"); pressEnter();
+        }
+    } while (choice != 15);
+}
+
+/* ================================================================ */
+/* CUSTOMER MENU                                                    */
+/* ================================================================ */
+void customerMenu(void) {
+    int choice;
+    do {
+        int idx = current_customer_index;
+        if (idx < 0 || idx >= cust_count || !customers[idx].active) break;
+
+        clearScreen();
+        header("CUSTOMER DASHBOARD");
+        printf("  Customer: %s\n", customers[idx].name);
+        printf("  Account No: %d\n\n", customers[idx].acc_no);
+        printf("  1. View Account Details\n");
+        printf("  2. View Balance\n");
+        printf("  3. Deposit Money\n");
+        printf("  4. Withdraw Money\n");
+        printf("  5. Transfer Funds\n");
+        printf("  6. Transaction History\n");
+        printf("  7. Account Statement\n");
+        printf("  8. Logout\n");
+
+        choice = getInt("\n  Choice: ");
+
+        switch (choice) {
+            case 1: clearScreen(); header("MY ACCOUNT"); showCustomer(idx); pressEnter(); break;
+            case 2: viewBalance(); break;
+            case 3: depositMoney(); break;
+            case 4: withdrawMoney(); break;
+            case 5: transferMoney(); break;
+            case 6: viewHistory(); break;
+            case 7: accountStatement(); break;
+            case 8: printf("\n  Logging out...\n"); break;
+            default: printf("\n  Invalid choice!\n"); pressEnter();
+        }
+    } while (choice != 8);
+}
+
+/* ================================================================ */
+/* ACCOUNT MANAGEMENT                                               */
+/* ================================================================ */
+void createAccount(void) {
+    clearScreen();
+    header("CREATE CUSTOMER ACCOUNT");
+
+    if (cust_count >= MAX_CUSTOMERS) {
+        printf("  Customer database is full!\n");
+        pressEnter();
+        return;
+    }
+
+    Customer c;
+    memset(&c, 0, sizeof(c));
+    c.acc_no = generateAccNo();
+    c.active = true;
+
+    do {
+        readInput("  Full Name: ", c.name, sizeof(c.name));
+        if (isBlank(c.name)) printf("  Name cannot be empty.\n");
+    } while (isBlank(c.name));
+
+    readInput("  Phone: ", c.phone, sizeof(c.phone));
+    readInput("  Address: ", c.address, sizeof(c.address));
+
+    do {
+        readInput("  Account Type (savings/current): ", c.acc_type, sizeof(c.acc_type));
+        for (int i = 0; c.acc_type[i]; i++) c.acc_type[i] = (char)tolower((unsigned char)c.acc_type[i]);
+        if (strcmp(c.acc_type, "savings") != 0 && strcmp(c.acc_type, "current") != 0)
+            printf("  Please enter savings or current.\n");
+    } while (strcmp(c.acc_type, "savings") != 0 && strcmp(c.acc_type, "current") != 0);
+
+    do {
+        readInput("  4-digit PIN: ", c.pin, sizeof(c.pin));
+        bool valid = strlen(c.pin) == 4;
+        for (int i = 0; c.pin[i] && valid; i++)
+            if (!isdigit((unsigned char)c.pin[i])) valid = false;
+        if (!valid) printf("  PIN must contain exactly 4 digits.\n");
+        if (valid) break;
+    } while (1);
+
+    do {
+        c.balance = getDouble("  Initial Deposit: ");
+        if (c.balance < 0) printf("  Initial deposit cannot be negative.\n");
+    } while (c.balance < 0);
+
+    getTime(c.created, sizeof(c.created));
+    customers[cust_count++] = c;
+
+    if (c.balance > 0)
+        addTransaction(c.acc_no, "Deposit", c.balance, c.balance, 0);
+
+    saveData();
+    logAction("Created customer account");
+
+    printf("\n  Account created successfully!\n");
+    printf("  Account Number: %d\n", c.acc_no);
+    printf("  Balance: $%.2f\n", c.balance);
+    pressEnter();
+}
+
+void viewAccounts(void) {
+    clearScreen();
+    header("ALL CUSTOMER ACCOUNTS");
+
+    if (cust_count == 0) {
+        printf("  No accounts found.\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  %-5s %-8s %-22s %-10s %-12s %-9s\n",
+           "No.", "Acc No", "Name", "Type", "Balance", "Status");
+    printf("  -----------------------------------------------------------------------\n");
+
+    for (int i = 0; i < cust_count; i++) {
+        printf("  %-5d %-8d %-22.22s %-10s $%-11.2f %-9s\n",
+               i + 1, customers[i].acc_no, customers[i].name,
+               customers[i].acc_type, customers[i].balance,
+               customers[i].active ? "ACTIVE" : "CLOSED");
+    }
+    pressEnter();
+}
+
+void searchAccount(void) {
+    clearScreen();
+    header("SEARCH ACCOUNT");
+
+    printf("  1. Search by Account Number\n");
+    printf("  2. Search by Customer Name\n");
+    int choice = getInt("\n  Choice: ");
+
+    if (choice == 1) {
+        int acc = getInt("  Account Number: ");
+        int idx = findCustomerAny(acc);
+        if (idx == -1) printf("\n  Account not found!\n");
+        else showCustomer(idx);
+    } else if (choice == 2) {
+        char name[MAX_STR];
+        readInput("  Customer Name (or part): ", name, sizeof(name));
+        bool found = false;
+        for (int i = 0; i < cust_count; i++) {
+            char a[MAX_STR], b[MAX_STR];
+            copyString(a, customers[i].name, sizeof(a));
+            copyString(b, name, sizeof(b));
+            for (int j = 0; a[j]; j++) a[j] = (char)tolower((unsigned char)a[j]);
+            for (int j = 0; b[j]; j++) b[j] = (char)tolower((unsigned char)b[j]);
+            if (strstr(a, b)) {
+                showCustomer(i);
+                found = true;
+            }
+        }
+        if (!found) printf("\n  No matching customer found!\n");
+    } else {
+        printf("\n  Invalid choice!\n");
+    }
+
+    pressEnter();
+}
+
+void updateAccount(void) {
+    clearScreen();
+    header("UPDATE CUSTOMER ACCOUNT");
+
+    int acc = getInt("  Account Number: ");
+    int idx = findCustomerAny(acc);
+
+    if (idx == -1) {
+        printf("  Account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    Customer *c = &customers[idx];
+    printf("\n  Updating: %s\n", c->name);
+    readInput("  New Name (Enter to keep current): ", c->name, sizeof(c->name));
+    readInput("  New Phone (Enter to keep current): ", c->phone, sizeof(c->phone));
+    readInput("  New Address (Enter to keep current): ", c->address, sizeof(c->address));
+
+    saveData();
+    logAction("Updated customer account");
+    printf("\n  Account updated successfully!\n");
+    pressEnter();
+}
+
+void deleteAccount(void) {
+    clearScreen();
+    header("DELETE ACCOUNT");
+
+    int acc = getInt("  Account Number: ");
+    int idx = findCustomerAny(acc);
+
+    if (idx == -1) {
+        printf("  Account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  Account: %s\n", customers[idx].name);
+    printf("  Balance: $%.2f\n", customers[idx].balance);
+
+    if (customers[idx].balance != 0) {
+        printf("  Account must have zero balance before deletion.\n");
+        pressEnter();
+        return;
+    }
+
+    if (!confirm("  Permanently delete this account? (y/n): ")) {
+        printf("  Cancelled.\n");
+        pressEnter();
+        return;
+    }
+
+    for (int i = idx; i < cust_count - 1; i++)
+        customers[i] = customers[i + 1];
+    cust_count--;
+
+    saveData();
+    logAction("Deleted customer account");
+    printf("\n  Account deleted successfully!\n");
+    pressEnter();
+}
+
+void viewBalance(void) {
+    clearScreen();
+    header("VIEW BALANCE");
+
+    int idx;
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0) {
+        idx = current_customer_index;
+    } else {
+        int acc = getInt("  Account Number: ");
+        idx = findCustomerAny(acc);
+    }
+
+    if (idx < 0 || idx >= cust_count || !customers[idx].active) {
+        printf("\n  Active account not found!\n");
+    } else {
+        printf("\n  Customer: %s\n", customers[idx].name);
+        printf("  Account: %d\n", customers[idx].acc_no);
+        printf("  Current Balance: $%.2f\n", customers[idx].balance);
+        if (customers[idx].balance < LOW_BALANCE_LIMIT)
+            printf("  WARNING: Balance is below $%.2f\n", LOW_BALANCE_LIMIT);
+    }
+    pressEnter();
+}
+
+void accountStatement(void) {
+    clearScreen();
+    header("ACCOUNT STATEMENT");
+
+    int acc;
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0)
+        acc = customers[current_customer_index].acc_no;
+    else
+        acc = getInt("  Account Number: ");
+
+    int idx = findCustomerAny(acc);
+    if (idx == -1) {
+        printf("  Account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  Account Statement\n");
+    printf("  Customer : %s\n", customers[idx].name);
+    printf("  Account  : %d\n", customers[idx].acc_no);
+    printf("  Type     : %s\n", customers[idx].acc_type);
+    printf("  Balance  : $%.2f\n", customers[idx].balance);
+    printf("  Created  : %s\n\n", customers[idx].created);
+    printf("  %-5s %-20s %-12s %-14s %-10s\n", "ID", "Date", "Type", "Amount", "Balance");
+    printf("  ----------------------------------------------------------------\n");
+
+    int found = 0;
+    for (int i = 0; i < trans_count; i++) {
+        if (transactions[i].acc_no == acc) {
+            printf("  %-5d %-20s %-12s $%-13.2f $%-10.2f\n",
+                   transactions[i].id, transactions[i].date, transactions[i].type,
+                   transactions[i].amount, transactions[i].balance_after);
+            found++;
+        }
+    }
+    if (!found) printf("  No transaction records found.\n");
+    pressEnter();
+}
+
+void sortAccounts(void) {
+    clearScreen();
+    header("SORT ACCOUNTS");
+
+    if (cust_count < 2) {
+        printf("  Not enough accounts to sort.\n");
+        pressEnter();
+        return;
+    }
+
+    printf("  1. Sort by Account Number\n");
+    printf("  2. Sort by Balance\n");
+    int choice = getInt("\n  Choice: ");
+
+    if (choice == 1)
+        qsort(customers, cust_count, sizeof(Customer), compareAccNo);
+    else if (choice == 2)
+        qsort(customers, cust_count, sizeof(Customer), compareBalance);
+    else {
+        printf("  Invalid choice!\n");
+        pressEnter();
+        return;
+    }
+
+    saveData();
+    logAction("Sorted customer accounts");
+    printf("\n  Accounts sorted successfully.\n\n");
+    for (int i = 0; i < cust_count; i++)
+        printf("  %-8d %-22.22s $%.2f\n", customers[i].acc_no, customers[i].name, customers[i].balance);
+    pressEnter();
+}
+
+void lowBalanceAlert(void) {
+    clearScreen();
+    header("LOW BALANCE ALERT");
+
+    int found = 0;
+    printf("  Threshold: $%.2f\n\n", LOW_BALANCE_LIMIT);
+    printf("  %-8s %-22s %-14s\n", "Acc No", "Customer", "Balance");
+    printf("  ------------------------------------------------\n");
+
+    for (int i = 0; i < cust_count; i++) {
+        if (customers[i].active && customers[i].balance < LOW_BALANCE_LIMIT) {
+            printf("  %-8d %-22.22s $%-13.2f\n",
+                   customers[i].acc_no, customers[i].name, customers[i].balance);
+            found++;
+        }
+    }
+
+    if (!found) printf("  No account is below the low-balance threshold.\n");
+    else logAction("Viewed low balance alerts");
+    pressEnter();
+}
+
+/* ================================================================ */
+/* TRANSACTIONS                                                     */
+/* ================================================================ */
+void depositMoney(void) {
+    clearScreen();
+    header("DEPOSIT MONEY");
+
+    int acc;
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0)
+        acc = customers[current_customer_index].acc_no;
+    else
+        acc = getInt("  Account Number: ");
+
+    int idx = findCustomer(acc);
+    if (idx == -1) {
+        printf("  Active account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  Customer: %s\n", customers[idx].name);
+    printf("  Current Balance: $%.2f\n", customers[idx].balance);
+
+    double amount = getDouble("  Amount to deposit: ");
+    if (amount <= 0) {
+        printf("  Amount must be positive!\n");
+        pressEnter();
+        return;
+    }
+
+    customers[idx].balance += amount;
+    addTransaction(acc, "Deposit", amount, customers[idx].balance, 0);
+    saveData();
+    logAction("Deposited money");
+
+    printf("\n  Deposit successful!\n");
+    printf("  New Balance: $%.2f\n", customers[idx].balance);
+    pressEnter();
+}
+
+void withdrawMoney(void) {
+    clearScreen();
+    header("WITHDRAW MONEY");
+
+    int acc;
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0)
+        acc = customers[current_customer_index].acc_no;
+    else
+        acc = getInt("  Account Number: ");
+
+    int idx = findCustomer(acc);
+    if (idx == -1) {
+        printf("  Active account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  Customer: %s\n", customers[idx].name);
+    printf("  Balance: $%.2f\n", customers[idx].balance);
+
+    if (strcmp(current_user.role, ROLE_CUSTOMER) != 0) {
+        char pin[8];
+        readInput("  Customer PIN: ", pin, sizeof(pin));
+        if (strcmp(pin, customers[idx].pin) != 0) {
+            printf("  Incorrect PIN!\n");
+            logAction("Failed withdrawal PIN validation");
+            pressEnter();
+            return;
+        }
+    }
+
+    double amount = getDouble("  Amount to withdraw: ");
+    if (amount <= 0) {
+        printf("  Amount must be positive!\n");
+        pressEnter();
+        return;
+    }
+    if (amount > customers[idx].balance) {
+        printf("  Insufficient balance!\n");
+        pressEnter();
+        return;
+    }
+
+    customers[idx].balance -= amount;
+    addTransaction(acc, "Withdraw", amount, customers[idx].balance, 0);
+    saveData();
+    logAction("Withdrew money");
+
+    printf("\n  Withdrawal successful!\n");
+    printf("  New Balance: $%.2f\n", customers[idx].balance);
+    if (customers[idx].balance < LOW_BALANCE_LIMIT)
+        printf("  WARNING: Low balance alert triggered!\n");
+    pressEnter();
+}
+
+void transferMoney(void) {
+    clearScreen();
+    header("TRANSFER FUNDS");
+
+    int from_acc;
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0)
+        from_acc = customers[current_customer_index].acc_no;
+    else
+        from_acc = getInt("  From Account: ");
+
+    int from_idx = findCustomer(from_acc);
+    if (from_idx == -1) {
+        printf("  Source account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  Sender: %s\n", customers[from_idx].name);
+    printf("  Balance: $%.2f\n", customers[from_idx].balance);
+
+    if (strcmp(current_user.role, ROLE_CUSTOMER) != 0) {
+        char pin[8];
+        readInput("  Sender PIN: ", pin, sizeof(pin));
+        if (strcmp(pin, customers[from_idx].pin) != 0) {
+            printf("  Incorrect PIN!\n");
+            logAction("Failed transfer PIN validation");
+            pressEnter();
+            return;
+        }
+    }
+
+    int to_acc = getInt("  To Account: ");
+    if (to_acc == from_acc) {
+        printf("  Cannot transfer to the same account!\n");
+        pressEnter();
+        return;
+    }
+
+    int to_idx = findCustomer(to_acc);
+    if (to_idx == -1) {
+        printf("  Destination account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    double amount = getDouble("  Amount: ");
+    if (amount <= 0) {
+        printf("  Amount must be positive!\n");
+        pressEnter();
+        return;
+    }
+    if (amount > customers[from_idx].balance) {
+        printf("  Insufficient balance!\n");
+        pressEnter();
+        return;
+    }
+
+    customers[from_idx].balance -= amount;
+    customers[to_idx].balance += amount;
+
+    addTransaction(from_acc, "Transfer-Out", amount, customers[from_idx].balance, to_acc);
+    addTransaction(to_acc, "Transfer-In", amount, customers[to_idx].balance, from_acc);
+    saveData();
+    logAction("Transferred funds");
+
+    printf("\n  Transfer successful!\n");
+    printf("  From: %d\n", from_acc);
+    printf("  To:   %d\n", to_acc);
+    printf("  Amount: $%.2f\n", amount);
+    printf("  Sender New Balance: $%.2f\n", customers[from_idx].balance);
+    pressEnter();
+}
+
+void viewHistory(void) {
+    clearScreen();
+    header("TRANSACTION HISTORY");
+
+    int acc;
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0)
+        acc = customers[current_customer_index].acc_no;
+    else
+        acc = getInt("  Account Number: ");
+
+    int idx = findCustomerAny(acc);
+    if (idx == -1) {
+        printf("  Account not found!\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  Account: %s (No: %d)\n\n", customers[idx].name, acc);
+    printf("  %-5s %-20s %-15s %-12s %-12s %-10s\n",
+           "ID", "Date", "Type", "Amount", "Balance", "Related");
+    printf("  -----------------------------------------------------------------------------\n");
+
+    int found = 0;
+    for (int i = 0; i < trans_count; i++) {
+        if (transactions[i].acc_no == acc) {
+            printf("  %-5d %-20s %-15s $%-11.2f $%-11.2f %-10d\n",
+                   transactions[i].id, transactions[i].date, transactions[i].type,
+                   transactions[i].amount, transactions[i].balance_after,
+                   transactions[i].related_acc);
+            found++;
+        }
+    }
+
+    if (!found) printf("  No transactions found.\n");
+    pressEnter();
+}
+
+void generateReports(void) {
+    clearScreen();
+    header("GENERATE BANKING REPORT");
+
+    FILE *f = fopen(REPORT_FILE, "w");
+    if (!f) {
+        printf("  Could not create report file!\n");
+        pressEnter();
+        return;
+    }
+
+    double totalBalance = 0.0;
+    double totalDeposits = 0.0;
+    double totalWithdrawals = 0.0;
+    double totalTransfers = 0.0;
+    int active = 0, closed = 0;
+
+    for (int i = 0; i < cust_count; i++) {
+        totalBalance += customers[i].balance;
+        if (customers[i].active) active++; else closed++;
+    }
+
+    for (int i = 0; i < trans_count; i++) {
+        if (strcmp(transactions[i].type, "Deposit") == 0) totalDeposits += transactions[i].amount;
+        else if (strcmp(transactions[i].type, "Withdraw") == 0) totalWithdrawals += transactions[i].amount;
+        else if (strcmp(transactions[i].type, "Transfer-Out") == 0) totalTransfers += transactions[i].amount;
+    }
+
+    fprintf(f, "BANKING TRANSACTION MANAGEMENT SYSTEM\n");
+    fprintf(f, "=====================================\n");
+    fprintf(f, "Generated: ");
+    char now[30]; getTime(now, sizeof(now));
+    fprintf(f, "%s\n\n", now);
+    fprintf(f, "Total Customers: %d\n", cust_count);
+    fprintf(f, "Active Accounts: %d\n", active);
+    fprintf(f, "Closed Accounts: %d\n", closed);
+    fprintf(f, "Total Current Balance: %.2f\n", totalBalance);
+    fprintf(f, "Total Deposit Transactions: %.2f\n", totalDeposits);
+    fprintf(f, "Total Withdrawal Transactions: %.2f\n", totalWithdrawals);
+    fprintf(f, "Total Transfer-Out Value: %.2f\n", totalTransfers);
+    fprintf(f, "Total Transaction Records: %d\n", trans_count);
+    fprintf(f, "\nACCOUNT SUMMARY\n");
+    fprintf(f, "AccNo|Name|Type|Balance|Status\n");
+
+    for (int i = 0; i < cust_count; i++) {
+        fprintf(f, "%d|%s|%s|%.2f|%s\n",
+                customers[i].acc_no, customers[i].name, customers[i].acc_type,
+                customers[i].balance, customers[i].active ? "ACTIVE" : "CLOSED");
+    }
+
+    fclose(f);
+    logAction("Generated banking report");
+
+    printf("  Report generated successfully.\n");
+    printf("  File: %s\n", REPORT_FILE);
+    printf("  Total customers: %d\n", cust_count);
+    printf("  Active accounts: %d\n", active);
+    printf("  Total balance: $%.2f\n", totalBalance);
+    pressEnter();
+}
+
+void addTransaction(int acc_no, const char *type, double amount,
+                    double balance, int related) {
+    if (trans_count >= MAX_TRANSACTIONS) return;
+
+    Transaction t;
+    memset(&t, 0, sizeof(t));
+    t.id = trans_count + 1;
+    t.acc_no = acc_no;
+    copyString(t.type, type, sizeof(t.type));
+    t.amount = amount;
+    t.balance_after = balance;
+    t.related_acc = related;
+    getTime(t.date, sizeof(t.date));
+
+    transactions[trans_count++] = t;
+}
+
+/* ================================================================ */
+/* STAFF MANAGEMENT                                                 */
+/* ================================================================ */
+void createStaff(void) {
+    clearScreen();
+    header("CREATE STAFF / ADMIN USER");
+
+    if (staff_count >= MAX_STAFF) {
+        printf("  Staff limit reached!\n");
+        pressEnter();
+        return;
+    }
+
+    Staff s;
+    memset(&s, 0, sizeof(s));
+    s.id = staff_count + 1;
+    s.active = true;
+
+    readInput("  Full Name: ", s.fullname, sizeof(s.fullname));
+
+    while (1) {
+        readInput("  Username: ", s.username, sizeof(s.username));
+        if (findStaffByUsername(s.username) == -1) break;
+        printf("  Username already exists!\n");
+    }
+
+    readInput("  Password: ", s.password, sizeof(s.password));
+    printf("  1. Staff\n");
+    printf("  2. Admin\n");
+    int role_choice = getInt("  Role: ");
+    copyString(s.role, role_choice == 2 ? ROLE_ADMIN : ROLE_STAFF, sizeof(s.role));
+
+    staffList[staff_count++] = s;
+    saveData();
+    logAction("Created staff/admin user");
+
+    printf("\n  User created: %s\n", s.username);
+    pressEnter();
+}
+
+void viewStaff(void) {
+    clearScreen();
+    header("ALL STAFF / ADMIN USERS");
+
+    if (staff_count == 0) {
+        printf("  No staff found.\n");
+        pressEnter();
+        return;
+    }
+
+    printf("\n  %-5s %-20s %-15s %-10s %-10s\n",
+           "ID", "Name", "Username", "Role", "Status");
+    printf("  ------------------------------------------------------------\n");
+
+    for (int i = 0; i < staff_count; i++) {
+        printf("  %-5d %-20.20s %-15.15s %-10s %-10s\n",
+               staffList[i].id, staffList[i].fullname, staffList[i].username,
+               staffList[i].role, staffList[i].active ? "ACTIVE" : "DISABLED");
+    }
+    pressEnter();
+}
+
+void disableStaff(void) {
+    clearScreen();
+    header("DISABLE / ENABLE STAFF");
+
+    char username[MAX_STR];
+    readInput("  Username: ", username, sizeof(username));
+    int idx = findStaffByUsername(username);
+
+    if (idx == -1) {
+        printf("  Staff user not found!\n");
+        pressEnter();
+        return;
+    }
+
+    if (strcmp(staffList[idx].username, current_user.username) == 0) {
+        printf("  You cannot disable your own account while logged in.\n");
+        pressEnter();
+        return;
+    }
+
+    staffList[idx].active = !staffList[idx].active;
+    saveData();
+    logAction(staffList[idx].active ? "Enabled staff user" : "Disabled staff user");
+    printf("\n  User %s is now %s.\n", username,
+           staffList[idx].active ? "ACTIVE" : "DISABLED");
+    pressEnter();
+}
+
+void changePassword(void) {
+    clearScreen();
+    header("CHANGE PASSWORD");
+
+    char old[MAX_STR], newp[MAX_STR], confirmp[MAX_STR];
+    readInput("  Current Password: ", old, sizeof(old));
+
+    if (strcmp(old, current_user.password) != 0) {
+        printf("  Incorrect password!\n");
+        pressEnter();
+        return;
+    }
+
+    readInput("  New Password: ", newp, sizeof(newp));
+    readInput("  Confirm Password: ", confirmp, sizeof(confirmp));
+
+    if (strcmp(newp, confirmp) != 0) {
+        printf("  Passwords do not match!\n");
+        pressEnter();
+        return;
+    }
+
+    if (strcmp(current_user.role, ROLE_CUSTOMER) == 0) {
+        printf("  Customer PIN changes are not available in this version.\n");
+        pressEnter();
+        return;
+    }
+
+    for (int i = 0; i < staff_count; i++) {
+        if (strcmp(staffList[i].username, current_user.username) == 0) {
+            copyString(staffList[i].password, newp, sizeof(staffList[i].password));
+            copyString(current_user.password, newp, sizeof(current_user.password));
+            break;
+        }
+    }
+
+    saveData();
+    logAction("Changed password");
+    printf("\n  Password changed successfully!\n");
+    pressEnter();
+}
+
+/* ================================================================ */
+/* SEARCH / HELPERS                                                 */
+/* ================================================================ */
+int findCustomer(int acc_no) {
+    for (int i = 0; i < cust_count; i++)
+        if (customers[i].acc_no == acc_no && customers[i].active) return i;
+    return -1;
+}
+
+int findCustomerAny(int acc_no) {
+    for (int i = 0; i < cust_count; i++)
+        if (customers[i].acc_no == acc_no) return i;
+    return -1;
+}
+
+int findCustomerByName(const char *name) {
+    for (int i = 0; i < cust_count; i++)
+        if (strcmp(customers[i].name, name) == 0) return i;
+    return -1;
+}
+
+int findStaffByUsername(const char *username) {
+    for (int i = 0; i < staff_count; i++)
+        if (strcmp(staffList[i].username, username) == 0) return i;
+    return -1;
+}
+
+int generateAccNo(void) {
+    int max = START_ACC_NO - 1;
+    for (int i = 0; i < cust_count; i++)
+        if (customers[i].acc_no > max) max = customers[i].acc_no;
+    return max + 1;
+}
+
+void showCustomer(int idx) {
+    printf("\n  ----------------------------------------------\n");
+    printf("  Account Number: %d\n", customers[idx].acc_no);
+    printf("  Name          : %s\n", customers[idx].name);
+    printf("  Phone         : %s\n", customers[idx].phone);
+    printf("  Address       : %s\n", customers[idx].address);
+    printf("  Account Type  : %s\n", customers[idx].acc_type);
+    printf("  Balance       : $%.2f\n", customers[idx].balance);
+    printf("  Status        : %s\n", customers[idx].active ? "ACTIVE" : "CLOSED");
+    printf("  Created       : %s\n", customers[idx].created);
+    printf("  ----------------------------------------------\n");
+}
+
+int compareAccNo(const void *a, const void *b) {
+    const Customer *x = (const Customer *)a;
+    const Customer *y = (const Customer *)b;
+    return (x->acc_no > y->acc_no) - (x->acc_no < y->acc_no);
+}
+
+int compareBalance(const void *a, const void *b) {
+    const Customer *x = (const Customer *)a;
+    const Customer *y = (const Customer *)b;
+    if (x->balance < y->balance) return -1;
+    if (x->balance > y->balance) return 1;
+    return 0;
+}
+
+/* ================================================================ */
+/* FILE HANDLING / BACKUP / LOGGING                                 */
+/* ================================================================ */
+void saveData(void) {
+    saveCustomers();
+    saveTransactions();
+    saveStaff();
+}
+
+void saveCustomers(void) {
+    FILE *f = fopen(CUSTOMER_FILE, "w");
+    if (!f) return;
+
+    fprintf(f, "%d\n", cust_count);
+    for (int i = 0; i < cust_count; i++) {
+        fprintf(f, "%d|%s|%s|%s|%s|%s|%.17g|%d|%s\n",
+                customers[i].acc_no, customers[i].name, customers[i].phone,
+                customers[i].address, customers[i].acc_type, customers[i].pin,
+                customers[i].balance, customers[i].active ? 1 : 0, customers[i].created);
+    }
+    fclose(f);
+}
+
+void saveTransactions(void) {
+    FILE *f = fopen(TRANSACTION_FILE, "w");
+    if (!f) return;
+
+    fprintf(f, "%d\n", trans_count);
+    for (int i = 0; i < trans_count; i++) {
+        fprintf(f, "%d|%d|%s|%.17g|%.17g|%d|%s\n",
+                transactions[i].id, transactions[i].acc_no, transactions[i].type,
+                transactions[i].amount, transactions[i].balance_after,
+                transactions[i].related_acc, transactions[i].date);
+    }
+    fclose(f);
+}
+
+void saveStaff(void) {
+    FILE *f = fopen(STAFF_FILE, "w");
+    if (!f) return;
+
+    fprintf(f, "%d\n", staff_count);
+    for (int i = 0; i < staff_count; i++) {
+        fprintf(f, "%d|%s|%s|%s|%s|%d\n",
+                staffList[i].id, staffList[i].username, staffList[i].password,
+                staffList[i].fullname, staffList[i].role, staffList[i].active ? 1 : 0);
+    }
+    fclose(f);
+}
+
+void loadData(void) {
+    loadCustomers();
+    loadTransactions();
+    loadStaff();
+}
+
+void loadCustomers(void) {
+    FILE *f = fopen(CUSTOMER_FILE, "r");
+    if (!f) return;
+
+    char line[600];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return; }
+    cust_count = atoi(line);
+    if (cust_count < 0 || cust_count > MAX_CUSTOMERS) cust_count = 0;
+
+    for (int i = 0; i < cust_count; i++) {
+        if (!fgets(line, sizeof(line), f)) { cust_count = i; break; }
+        Customer *c = &customers[i];
+        memset(c, 0, sizeof(*c));
+        char *tok = strtok(line, "|\n");
+        if (!tok) { cust_count = i; break; } c->acc_no = atoi(tok);
+        tok = strtok(NULL, "|\n"); if (tok) copyString(c->name, tok, sizeof(c->name));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(c->phone, tok, sizeof(c->phone));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(c->address, tok, sizeof(c->address));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(c->acc_type, tok, sizeof(c->acc_type));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(c->pin, tok, sizeof(c->pin));
+        tok = strtok(NULL, "|\n"); if (tok) c->balance = atof(tok);
+        tok = strtok(NULL, "|\n"); if (tok) c->active = atoi(tok) != 0;
+        tok = strtok(NULL, "|\n"); if (tok) copyString(c->created, tok, sizeof(c->created));
+    }
+    fclose(f);
+}
+
+void loadTransactions(void) {
+    FILE *f = fopen(TRANSACTION_FILE, "r");
+    if (!f) return;
+
+    char line[400];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return; }
+    trans_count = atoi(line);
+    if (trans_count < 0 || trans_count > MAX_TRANSACTIONS) trans_count = 0;
+
+    for (int i = 0; i < trans_count; i++) {
+        if (!fgets(line, sizeof(line), f)) { trans_count = i; break; }
+        Transaction *t = &transactions[i];
+        memset(t, 0, sizeof(*t));
+        char *tok = strtok(line, "|\n");
+        if (!tok) { trans_count = i; break; } t->id = atoi(tok);
+        tok = strtok(NULL, "|\n"); if (tok) t->acc_no = atoi(tok);
+        tok = strtok(NULL, "|\n"); if (tok) copyString(t->type, tok, sizeof(t->type));
+        tok = strtok(NULL, "|\n"); if (tok) t->amount = atof(tok);
+        tok = strtok(NULL, "|\n"); if (tok) t->balance_after = atof(tok);
+        tok = strtok(NULL, "|\n"); if (tok) t->related_acc = atoi(tok);
+        tok = strtok(NULL, "|\n"); if (tok) copyString(t->date, tok, sizeof(t->date));
+    }
+    fclose(f);
+}
+
+void loadStaff(void) {
+    FILE *f = fopen(STAFF_FILE, "r");
+    if (!f) return;
+
+    char line[500];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return; }
+    staff_count = atoi(line);
+    if (staff_count < 0 || staff_count > MAX_STAFF) staff_count = 0;
+
+    for (int i = 0; i < staff_count; i++) {
+        if (!fgets(line, sizeof(line), f)) { staff_count = i; break; }
+        Staff *s = &staffList[i];
+        memset(s, 0, sizeof(*s));
+        char *tok = strtok(line, "|\n");
+        if (!tok) { staff_count = i; break; } s->id = atoi(tok);
+        tok = strtok(NULL, "|\n"); if (tok) copyString(s->username, tok, sizeof(s->username));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(s->password, tok, sizeof(s->password));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(s->fullname, tok, sizeof(s->fullname));
+        tok = strtok(NULL, "|\n"); if (tok) copyString(s->role, tok, sizeof(s->role));
+        tok = strtok(NULL, "|\n"); if (tok) s->active = atoi(tok) != 0;
+    }
+    fclose(f);
+}
+
+void initAdmin(void) {
+    if (staff_count == 0) {
+        Staff s;
+        memset(&s, 0, sizeof(s));
+        s.id = 1;
+        copyString(s.username, "admin", sizeof(s.username));
+        copyString(s.password, "admin123", sizeof(s.password));
+        copyString(s.fullname, "Administrator", sizeof(s.fullname));
+        copyString(s.role, ROLE_ADMIN, sizeof(s.role));
+        s.active = true;
+        staffList[staff_count++] = s;
+        saveData();
+    }
+}
+
+void backupData(void) {
+    clearScreen();
+    header("BACKUP DATA");
+
+    const char *src[] = { CUSTOMER_FILE, TRANSACTION_FILE, STAFF_FILE, LOG_FILE };
+    const char *dst[] = { BACKUP_CUSTOMER, BACKUP_TRANS, BACKUP_STAFF, BACKUP_LOG };
+    int ok = 0;
+
+    saveData();
+
+    for (int i = 0; i < 4; i++) {
+        FILE *in = fopen(src[i], "rb");
+        FILE *out = fopen(dst[i], "wb");
+        if (!in || !out) {
+            if (in) fclose(in);
+            if (out) fclose(out);
+            continue;
+        }
+        int ch;
+        while ((ch = fgetc(in)) != EOF) fputc(ch, out);
+        fclose(in);
+        fclose(out);
+        ok++;
+    }
+
+    if (ok == 4) {
+        logAction("Created full data backup");
+        printf("  Backup completed successfully.\n");
+    } else {
+        printf("  Backup partially completed (%d/4 files).\n", ok);
+    }
+    pressEnter();
+}
+
+void restoreData(void) {
+    clearScreen();
+    header("RESTORE DATA");
+
+    if (!confirm("  Restore all data from backup? (y/n): ")) {
+        printf("  Restore cancelled.\n");
+        pressEnter();
+        return;
+    }
+
+    const char *src[] = { BACKUP_CUSTOMER, BACKUP_TRANS, BACKUP_STAFF, BACKUP_LOG };
+    const char *dst[] = { CUSTOMER_FILE, TRANSACTION_FILE, STAFF_FILE, LOG_FILE };
+    int ok = 0;
+
+    for (int i = 0; i < 4; i++) {
+        FILE *in = fopen(src[i], "rb");
+        FILE *out = fopen(dst[i], "wb");
+        if (!in || !out) {
+            if (in) fclose(in);
+            if (out) fclose(out);
+            continue;
+        }
+        int ch;
+        while ((ch = fgetc(in)) != EOF) fputc(ch, out);
+        fclose(in);
+        fclose(out);
+        ok++;
+    }
+
+    if (ok == 4) {
+        loadData();
+        logAction("Restored full data backup");
+        printf("  Data restored successfully.\n");
+    } else {
+        printf("  Restore failed or is incomplete (%d/4 files).\n", ok);
+    }
+    pressEnter();
+}
+
+void logAction(const char *action) {
+    FILE *f = fopen(LOG_FILE, "a");
+    if (!f) return;
+
+    char now[30];
+    getTime(now, sizeof(now));
+    const char *user = "SYSTEM";
+    if (logged_in && current_user.fullname[0]) user = current_user.fullname;
+    fprintf(f, "%s|%s|%s\n", now, user, action);
+    fclose(f);
+}
+
+/* ================================================================ */
+/* INPUT / UTILITY                                                  */
+/* ================================================================ */
+void clearScreen(void) {
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+}
+
+void header(const char *title) {
+    printf("==============================================================\n");
+    printf("  %s\n", title);
+    printf("==============================================================\n");
+}
+
+void pressEnter(void) {
+    char buf[8];
+    printf("\n  Press Enter to continue...");
+    fgets(buf, sizeof(buf), stdin);
+}
+
+void getTime(char *buffer, size_t size) {
+    time_t t = time(NULL);
+    struct tm *tm_info = localtime(&t);
+    if (tm_info) strftime(buffer, size, "%Y-%m-%d %H:%M:%S", tm_info);
+    else if (size > 0) buffer[0] = '\0';
+}
+
+void readInput(const char *prompt, char *buffer, int size) {
+    printf("%s", prompt);
+    if (fgets(buffer, size, stdin) == NULL) {
+        saveData();
+        exit(0);
+    }
+
+    if (strchr(buffer, '\n') == NULL) {
+        int ch;
+        while ((ch = getchar()) != '\n' && ch != EOF) {}
+    }
+
+    buffer[strcspn(buffer, "\n")] = '\0';
+    sanitizeField(buffer);
+}
+
+int getInt(const char *prompt) {
+    char buf[64];
+    int val;
+    char extra;
+
+    while (1) {
+        readInput(prompt, buf, sizeof(buf));
+        if (sscanf(buf, "%d %c", &val, &extra) == 1) return val;
+        printf("  Enter a valid integer!\n");
+    }
+}
+
+double getDouble(const char *prompt) {
+    char buf[64];
+    double val;
+    char extra;
+
+    while (1) {
+        readInput(prompt, buf, sizeof(buf));
+        if (sscanf(buf, "%lf %c", &val, &extra) == 1) return val;
+        printf("  Enter a valid amount!\n");
+    }
+}
+
+bool confirm(const char *prompt) {
+    char buf[16];
+    readInput(prompt, buf, sizeof(buf));
+    return buf[0] == 'y' || buf[0] == 'Y';
+}
+
+void sanitizeField(char *s) {
+    /* '|' is the record separator in the text files. */
+    for (int i = 0; s[i]; i++)
+        if (s[i] == '|') s[i] = '/';
+}
+
+void copyString(char *dest, const char *src, size_t size) {
+    if (size == 0) return;
+    strncpy(dest, src, size - 1);
+    dest[size - 1] = '\0';
+}
+
+void trimSpaces(char *s) {
+    char *start = s;
+    while (isspace((unsigned char)*start)) start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) s[--n] = '\0';
+}
+
+bool isBlank(const char *s) {
+    while (*s) {
+        if (!isspace((unsigned char)*s)) return false;
+        s++;
+    }
+    return true;
+}
